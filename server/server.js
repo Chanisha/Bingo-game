@@ -13,7 +13,6 @@ const io = new Server(server, {
 
 const rooms = {};
 
-// Default route for debugging
 app.get('/', (req, res) => {
   res.send('Bingo Socket.IO server is running');
 });
@@ -24,37 +23,100 @@ io.on('connection', (socket) => {
       rooms[roomCode] = {
         players: [],
         drawnNumbers: [],
+        currentTurn: null,
       };
     }
 
-    const playerId = `Player ${rooms[roomCode].players.length + 1}`;
-    rooms[roomCode].players.push({ id: socket.id, label: playerId, score: 0 });
+    const room = rooms[roomCode];
+    const playerId = `Player ${room.players.length + 1}`;
+    room.players.push({ id: socket.id, label: playerId, score: 0 });
 
     socket.join(roomCode);
-    socket.emit('player-info', playerId); // Send player label to the client
+    socket.emit('player-info', playerId);
+
+    if (room.players.length === 2 && !room.currentTurn) {
+      room.currentTurn = room.players[0].id;
+      io.to(roomCode).emit('turn', room.players[0].label);
+    }
+
     console.log(`${playerId} joined room ${roomCode}`);
   });
 
-  socket.on('start-draw', (roomCode) => {
-    const nums = Array.from({ length: 100 }, (_, i) => i + 1).sort(() => 0.5 - Math.random());
-    let index = 0;
+  socket.on('number-selected', ({ roomCode, number, player }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
 
-    const interval = setInterval(() => {
-      if (index >= nums.length) {
-        clearInterval(interval);
-        return;
+    // Validate it's the correct player's turn
+    if (socket.id !== room.currentTurn) return;
+
+    if (!room.drawnNumbers.includes(number)) {
+      room.drawnNumbers.push(number);
+
+      io.to(roomCode).emit('number-selected', {
+        number,
+        player,
+      });
+
+      // Switch turn
+      const nextPlayer = room.players.find(p => p.id !== socket.id);
+      if (nextPlayer) {
+        room.currentTurn = nextPlayer.id;
+        io.to(roomCode).emit('turn', nextPlayer.label);
       }
-      const next = nums[index++];
-      io.to(roomCode).emit('number-drawn', next);
-    }, 5000);
+    }
   });
 
   socket.on('score-update', ({ roomCode, score }) => {
-    const player = rooms[roomCode]?.players.find(p => p.id === socket.id);
+    const room = rooms[roomCode];
+    if (!room) return;
+
+    const player = room.players.find(p => p.id === socket.id);
     if (player) {
       player.score = score;
       if (score >= 5) {
         io.to(roomCode).emit('game-won', player.label);
+      }
+    }
+  });
+
+  socket.on('reset-game', (roomCode) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+
+    room.drawnNumbers = [];
+
+    // Reset all players' scores
+    room.players.forEach(p => {
+      p.score = 0;
+    });
+
+    // Reset turn to Player 1 if present
+    if (room.players.length > 0) {
+      room.currentTurn = room.players[0].id;
+      io.to(roomCode).emit('turn', room.players[0].label);
+    }
+
+    io.to(roomCode).emit('reset-client');
+  });
+
+  socket.on('disconnect', () => {
+    for (const [roomCode, room] of Object.entries(rooms)) {
+      const playerIndex = room.players.findIndex(p => p.id === socket.id);
+      if (playerIndex !== -1) {
+        const player = room.players.splice(playerIndex, 1)[0];
+        console.log(`${player.label} left room ${roomCode}`);
+
+        // If room is empty, delete it
+        if (room.players.length === 0) {
+          delete rooms[roomCode];
+        } else {
+          // Reset game state if a player disconnects
+          room.drawnNumbers = [];
+          room.currentTurn = room.players[0].id;
+          io.to(roomCode).emit('reset-client');
+          io.to(roomCode).emit('turn', room.players[0].label);
+        }
+        break;
       }
     }
   });
